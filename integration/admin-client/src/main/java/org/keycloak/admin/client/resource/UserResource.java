@@ -142,4 +142,8 @@ public interface UserResource {
     @Path("consents/{client}")
     public void revokeConsent(@PathParam("client") String clientId);
 
+    @POST
+    @Path("impersonate")
+    @Produces(MediaType.APPLICATION_JSON)
+    Map<String, Object> impersonate(@QueryParam("client_id") String clientId);
 }

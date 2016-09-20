@@ -104,6 +104,11 @@ import org.keycloak.theme.Theme;
 import org.keycloak.theme.Theme.Type;
 import org.keycloak.theme.ThemeProvider;
 
+import org.keycloak.models.AdminRoles;
+import org.keycloak.models.UserSessionProvider;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.representations.AccessTokenResponse;
+
 /**
  * Base resource for managing users
  *
@@ -118,6 +123,8 @@ public class UsersResource {
     private RealmAuth auth;
 
     private AdminEventBuilder adminEvent;
+	
+	private TokenManager tokenManager;
 
     @Context
     protected ClientConnection clientConnection;
@@ -135,6 +142,7 @@ public class UsersResource {
         this.auth = auth;
         this.realm = realm;
         this.adminEvent = adminEvent;
+		this.tokenManager = tokenManager;
 
         auth.init(RealmAuth.Resource.USER);
     }
@@ -226,8 +234,8 @@ public class UsersResource {
                 session.getTransaction().setRollbackOnly();
             }
             return ErrorResponse.exists("User exists with same username or email");
+            }
         }
-    }
 
     public static void updateUserFromRep(UserModel user, UserRepresentation rep, Set<String> attrsToRemove, RealmModel realm, KeycloakSession session, boolean removeMissingRequiredActions) {
         if (rep.getUsername() != null && realm.isEditUsernameAllowed()) {
@@ -343,6 +351,67 @@ public class UsersResource {
              .detail(Details.IMPERSONATOR, auth.getAuth().getUser().getUsername()).success();
 
         return result;
+    }
+	
+	/**
+     * Custom Smartling endpoint to allow for impersonation.
+     * @param id userId(email) of user to impersonate
+     * @param clientId client id
+     * @return on success, an {@link org.keycloak.representations.AccessTokenResponse}, on failure an {@link org.keycloak.services.ErrorResponse}
+     */
+    @Path("{id}/impersonate")
+    @POST
+    public Response impersonateUser(@PathParam("id") String id, @QueryParam(OIDCLoginProtocol.CLIENT_ID_PARAM) String clientId) {
+
+        if (!auth.getAuth().hasRealmRole(AdminRoles.ADMIN)) {
+            auth.requireManage();
+        }
+
+        UserModel user = session.userStorage().getUserById(id, realm);
+
+
+        if (user == null) {
+            return ErrorResponse.error("User not found", Response.Status.NOT_FOUND);
+        }
+
+        if (!user.isEnabled()) {
+            return ErrorResponse.error("User is disabled", Response.Status.BAD_REQUEST);
+        }
+
+        if (user.getEmail() == null) {
+            return ErrorResponse.error("User email missing", Response.Status.BAD_REQUEST);
+        }
+
+        ClientModel client = realm.getClientByClientId(clientId);
+
+
+        UserSessionProvider sessions = session.sessions();
+
+        UserSessionModel userSession = session.sessions().createUserSession(realm, user, user.getUsername(), clientConnection.getRemoteAddr(), "impersonate", false, null, null);
+        EventBuilder event = new EventBuilder(realm, session, clientConnection);
+
+        event.event(EventType.IMPERSONATE)
+                .session(userSession)
+                .user(user)
+                .detail(Details.IMPERSONATOR_REALM, realm.getName())
+                .detail(Details.IMPERSONATOR, auth.getAuth().getUser().getUsername())
+                .detail(Details.RESPONSE_TYPE, "token").success();
+
+        event.session(userSession);
+
+        ClientSessionModel clientSession = sessions.createClientSession(realm, client);
+        clientSession.setAuthMethod(OIDCLoginProtocol.LOGIN_PROTOCOL);
+        clientSession.setNote(OIDCLoginProtocol.ISSUER, Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()));
+
+        TokenManager.attachClientSession(userSession, clientSession);
+
+        AccessTokenResponse res = tokenManager.responseBuilder(realm, client, event, session, userSession, clientSession)
+                .generateAccessToken()
+                .generateRefreshToken()
+                .generateIDToken()
+                .build();
+
+        return Response.ok(res, MediaType.APPLICATION_JSON_TYPE).build();
     }
 
 
